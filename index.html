@@ -1,0 +1,177 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// -------- CONFIGURACIÓN WIFI --------
+const char* ssid = "Estudiantes ITSVN";
+const char* password = "Estudiantes2018*";
+
+WebServer server(80);
+
+// -------- CONFIGURACIÓN RELÉS (14) --------
+const uint8_t reles[] = {23, 22, 21, 19, 18, 5, 17, 16, 4, 2, 15, 13, 12, 14};
+const int numReles = 14;
+
+unsigned long tiempoAnterior = 0;
+int intervalo = 1000; 
+int paso = 0;
+int secuenciaActiva = 0;
+bool ejecutando = false;
+
+// --- HMI MINIMALISTA BLANCO ---
+const char* html_index = R"=====(
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ITSVN - Control</title>
+    <style>
+        body {
+            margin: 0; font-family: 'Segoe UI', Arial, sans-serif;
+            background-color: #ffffff; color: #333;
+            display: flex; align-items: center; justify-content: center; min-height: 100vh;
+        }
+        .container {
+            width: 90%; max-width: 380px; text-align: center;
+            padding: 20px; border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            border: 1px solid #eee;
+        }
+        h1 { font-size: 1.4rem; color: #1a1a1a; margin-bottom: 5px; }
+        h2 { font-size: 0.9rem; color: #666; margin-bottom: 25px; font-weight: 400; }
+        
+        .grid { display: flex; flex-direction: column; gap: 12px; }
+        
+        .btn {
+            padding: 18px; border: none; border-radius: 12px;
+            color: white; font-weight: 600; cursor: pointer;
+            transition: all 0.2s ease; font-size: 15px;
+            text-transform: uppercase; letter-spacing: 1px;
+        }
+        .btn:active { transform: scale(0.97); }
+
+        /* Colores Limpios */
+        .s1 { background-color: #3498db; } /* Azul */
+        .s2 { background-color: #9b59b6; } /* Morado */
+        .s3 { background-color: #2ecc71; } /* Verde */
+        .s4 { background-color: #f1c40f; } /* Amarillo */
+        .off { background-color: #e74c3c; margin-top: 10px; } /* Rojo */
+
+        .speed-box { margin: 20px 0; padding: 10px; border-top: 1px solid #eee; }
+        label { font-size: 0.8rem; color: #888; display: block; margin-bottom: 8px; }
+        input[type=range] { width: 100%; accent-color: #3498db; }
+        
+        #status { margin-top: 15px; font-size: 0.8rem; color: #aaa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>INSTITUTO VIDA NUEVA</h1>
+        <h2>Panel de Control</h2>
+
+        <div class="grid">
+            <button class="btn s1" onclick="enviar('/s1')">Secuencia 1</button>
+            <button class="btn s2" onclick="enviar('/s2')">Secuencia 2</button>
+            <button class="btn s3" onclick="enviar('/s3')">Secuencia 3</button>
+            <button class="btn s4" onclick="enviar('/s4')">Secuencia 4</button>
+            <button class="btn off" onclick="enviar('/off')">Detener Todo</button>
+        </div>
+
+        <div class="speed-box">
+            <label>Velocidad del Sistema</label>
+            <input type="range" min="100" max="2000" value="1000" onchange="updateSpeed(this.value)">
+        </div>
+
+        <div id="status">Listo</div>
+    </div>
+
+    <script>
+        function enviar(ruta) {
+            document.getElementById('status').innerText = "Enviando...";
+            fetch(ruta).then(() => {
+                document.getElementById('status').innerText = "OK";
+            });
+        }
+        function updateSpeed(val) {
+            fetch('/speed?val=' + val);
+            document.getElementById('status').innerText = "Velocidad: " + val + "ms";
+        }
+    </script>
+</body>
+</html>
+)=====";
+
+// --- LÓGICA DE CONTROL ---
+void setGrupo(char grupo, bool estado) {
+  int inicio, fin;
+  if (grupo == 'A') { inicio = 0; fin = 2; }
+  else if (grupo == 'B') { inicio = 3; fin = 5; }
+  else if (grupo == 'C') { inicio = 6; fin = 8; }
+  else { inicio = 9; fin = 13; }
+  for (int i = inicio; i <= fin; i++) digitalWrite(reles[i], estado ? LOW : HIGH);
+}
+
+void apagarTodo() { for (int i = 0; i < numReles; i++) digitalWrite(reles[i], HIGH); }
+
+void ejecutarPaso() {
+  switch (secuenciaActiva) {
+    case 1: 
+      if (paso < 4) setGrupo("ABCD"[paso], true);
+      else if (paso < 8) setGrupo("ABCD"[paso-4], false);
+      else { ejecutando = false; }
+      break;
+    case 2:
+      if (paso == 0) { setGrupo('A',1); setGrupo('B',1); setGrupo('C',1); setGrupo('D',1); }
+      else if (paso == 1) apagarTodo();
+      else { ejecutando = false; }
+      break;
+    case 3:
+      if (paso == 0) { setGrupo('A',1); setGrupo('B',1); }
+      else if (paso == 1) { setGrupo('C',1); setGrupo('D',1); }
+      else if (paso == 2) { setGrupo('A',0); setGrupo('B',0); }
+      else if (paso == 3) { setGrupo('C',0); setGrupo('D',0); }
+      else { ejecutando = false; }
+      break;
+    case 4:
+      if (paso == 0) setGrupo('A',1); else if (paso == 1) setGrupo('B',1);
+      else if (paso == 2) setGrupo('A',0); else if (paso == 3) setGrupo('B',0);
+      else if (paso == 4) { setGrupo('A',1); setGrupo('B',1); setGrupo('C',1); setGrupo('D',1); }
+      else if (paso == 5) apagarTodo();
+      else { ejecutando = false; }
+      break;
+  }
+  paso++;
+}
+
+void setup() {
+  Serial.begin(115200);
+  for (int i = 0; i < numReles; i++) {
+    pinMode(reles[i], OUTPUT);
+    digitalWrite(reles[i], HIGH);
+  }
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+
+  server.on("/", []() { server.send(200, "text/html", html_index); });
+  server.on("/speed", []() { 
+    if (server.hasArg("val")) intervalo = server.arg("val").toInt();
+    server.send(200);
+  });
+  server.on("/s1", []() { paso=0; secuenciaActiva=1; ejecutando=true; server.send(200); });
+  server.on("/s2", []() { paso=0; secuenciaActiva=2; ejecutando=true; server.send(200); });
+  server.on("/s3", []() { paso=0; secuenciaActiva=3; ejecutando=true; server.send(200); });
+  server.on("/s4", []() { paso=0; secuenciaActiva=4; ejecutando=true; server.send(200); });
+  server.on("/off", []() { ejecutando=false; apagarTodo(); server.send(200); });
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  if (ejecutando && millis() - tiempoAnterior >= intervalo) {
+    tiempoAnterior = millis();
+    ejecutarPaso();
+  }
+  if (WiFi.status() != WL_CONNECTED) { WiFi.begin(ssid, password); delay(1000); }
+}
